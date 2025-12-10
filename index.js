@@ -29,4 +29,28 @@ try {
   console.log('✅ Firebase Admin initialized successfully');
 } catch (error) {
   console.error('❌ Firebase Admin initialization failed:', error.message);
+} async function initializeSuperAdmin() {
+  try {
+    const existingAdmin = await usersCollection.findOne({ 
+      email: process.env.SUPER_ADMIN_EMAIL 
+    });
+
+    if (!existingAdmin) {
+      const hashedPassword = await bcrypt.hash(process.env.SUPER_ADMIN_PASSWORD, 10);
+      await usersCollection.insertOne({
+        email: process.env.SUPER_ADMIN_EMAIL,
+        password: hashedPassword,
+        displayName: 'Super Admin',
+        role: 'admin',
+        profileImage: '',
+        createdAt: new Date(),
+        isActive: true
+      });
+      console.log('✅ Super Admin created successfully');
+    } else {
+      console.log('ℹ️  Super Admin already exists');
+    }
+  } catch (error) {
+    console.error('❌ Super Admin initialization failed:', error);
+  }
 }
