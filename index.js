@@ -102,3 +102,52 @@ async function initializeSuperAdmin() {
     console.error('❌ Super Admin initialization failed:', error);
   }
 }
+const verifyToken = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ message: 'No token provided' });
+    }
+
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(token);
+      req.user = decodedToken;
+      next();
+    } catch (firebaseError) {
+      jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+        if (err) {
+          return res.status(403).json({ message: 'Invalid token' });
+        }
+        req.user = decoded;
+        next();
+      });
+    }
+  } catch (error) {
+    res.status(403).json({ message: 'Token verification failed' });
+  }
+};
+
+const verifyAdmin = async (req, res, next) => {
+  try {
+    const user = await usersCollection.findOne({ email: req.user.email });
+    if (user?.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    next();
+  } catch (error) {
+    res.status(500).json({ message: 'Authorization check failed' });
+  }
+};
+
+const verifyDecorator = async (req, res, next) => {
+  try {
+    const user = await usersCollection.findOne({ email: req.user.email });
+    if (user?.role !== 'decorator' && user?.role !== 'admin') {
+      return res.status(403).json({ message: 'Decorator access required' });
+    }
+    next();
+  } catch (error) {
+    res.status(500).json({ message: 'Authorization check failed' });
+  }
+};
