@@ -259,3 +259,29 @@ app.get('/api/auth/me', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'Failed to get user data' });
   }
 });
+app.post('/api/upload-image', async (req, res) => {
+  try {
+    const { image } = req.body;
+
+    if (!image) {
+      return res.status(400).json({ message: 'No image provided' });
+    }
+
+    const formData = new URLSearchParams();
+    formData.append('key', process.env.IMGBB_API_KEY);
+    formData.append('image', image.split(',')[1] || image);
+
+    const response = await axios.post('https://api.imgbb.com/1/upload', formData, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+
+    res.json({
+      success: true,
+      url: response.data.data.url,
+      deleteUrl: response.data.data.delete_url
+    });
+  } catch (error) {
+    console.error('Image upload error:', error.response?.data || error.message);
+    res.status(500).json({ message: 'Image upload failed' });
+  }
+});
