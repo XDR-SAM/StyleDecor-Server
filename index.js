@@ -882,3 +882,78 @@ app.get('/api/payments', verifyToken, verifyAdmin, async (req, res) => {
     });
   }
 });
+pp.get('/api/decorators', async (req, res) => {
+  try {
+    const { search } = req.query;
+    let query = { role: 'decorator' };
+
+    if (search) {
+      query.displayName = { $regex: search, $options: 'i' };
+    }
+
+    const decorators = await usersCollection
+      .find(query, { projection: { password: 0 } })
+      .toArray();
+
+    res.json({ decorators });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch decorators' });
+  }
+});
+
+app.patch('/api/users/:email/make-decorator', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { email } = req.params;
+    const { specialty, rating, experience } = req.body;
+
+    const result = await usersCollection.updateOne(
+      { email },
+      { 
+        $set: { 
+          role: 'decorator',
+          specialty: specialty || '',
+          rating: rating || 0,
+          experience: experience || '',
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({ message: 'User role updated to decorator successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update user role' });
+  }
+});
+
+app.patch('/api/decorators/:email/toggle-status', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    const user = await usersCollection.findOne({ email, role: 'decorator' });
+    
+    if (!user) {
+      return res.status(404).json({ message: 'Decorator not found' });
+    }
+
+    const result = await usersCollection.updateOne(
+      { email },
+      { 
+        $set: { 
+          isActive: !user.isActive,
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    res.json({ 
+      message: `Decorator ${user.isActive ? 'disabled' : 'enabled'} successfully`,
+      isActive: !user.isActive
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to toggle decorator status' });
+  }
+});
