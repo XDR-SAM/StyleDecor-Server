@@ -420,3 +420,230 @@ app.delete('/api/services/:id', verifyToken, verifyAdmin, async (req, res) => {
     res.status(500).json({ message: 'Failed to delete service' });
   }
 });
+app.post('/api/bookings', verifyToken, async (req, res) => {
+  try {
+    const { serviceId, bookingDate, location, userNotes } = req.body;
+
+    const service = await servicesCollection.findOne({ 
+      _id: new ObjectId(serviceId) 
+    });
+
+    if (!service) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    const user = await usersCollection.findOne({ email: req.user.email });
+
+    const newBooking = {
+      serviceId: new ObjectId(serviceId),
+      serviceName: service.service_name,
+      serviceCost: service.cost,
+      userEmail: req.user.email,
+      userName: user.displayName,
+      bookingDate: new Date(bookingDate),
+      location,
+      userNotes: userNotes || '',
+      status: 'pending',
+      isPaid: false,
+      paymentStatus: 'unpaid', // Add paymentStatus field for consistency
+      assignedDecorator: null,
+      createdAt: new Date()
+    };
+
+    const result = await bookingsCollection.insertOne(newBooking);
+
+    res.status(201).json({
+      message: 'Booking created successfully',
+      bookingId: result.insertedId
+    });
+  } catch (error) {
+    console.error('Create booking error:', error);
+    res.status(500).json({ message: 'Failed to create booking' });
+  }
+});
+
+app.get('/api/bookings/my-bookings', verifyToken, async (req, res) => {
+  try {
+    const { page = 1, limit = 10 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const bookings = await bookingsCollection
+      .find({ userEmail: req.user.email })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .toArray();
+
+    const total = await bookingsCollection.countDocuments({ 
+      userEmail: req.user.email 
+    });
+
+    res.json({
+      bookings,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch bookings' });
+  }
+});
+
+app.get('/api/bookings', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { page = 1, limit = 10, status, sortBy = 'createdAt' } = req.query;
+    
+    let query = {};
+    if (status) {
+      query.status = status;
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const bookings = await bookingsCollection
+      .find(query)
+      .sort({ [sortBy]: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .toArray();
+
+    const total = await bookingsCollection.countDocuments(query);
+
+    res.json({
+      bookings,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch bookings' });
+  }
+});
+
+app.patch('/api/bookings/:id/status', verifyToken, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const user = await usersCollection.findOne({ email: req.user.email });
+
+    if (user.role !== 'admin' && user.role !== 'decorator') {
+      return res.status(403).json({ message: 'Unauthorized' });
+    }
+
+    const validStatuses = [
+      'pending', 'confirmed', 'assigned', 'planning', 
+      'materials-prepared', 'on-the-way', 'in-progress', 
+      'completed', 'cancelled'
+    ];
+
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    const result = await bookingsCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { 
+        $set: { 
+          status,
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    res.json({ message: 'Booking status updated successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update booking status' });
+  }
+});
+
+app.patch('/api/bookings/:id/assign-decorator', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { decoratorEmail } = req.body;
+
+    const decorator = await usersCollection.findOne({ 
+      email: decoratorEmail,
+      role: 'decorator'
+    });
+
+    if (!decorator) {
+      return res.status(404).json({ message: 'Decorator not found' });
+    }
+
+    const result = await bookingsCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { 
+        $set: { 
+          assignedDecorator: decoratorEmail,
+          status: 'assigned',
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    res.json({ message: 'Decorator assigned successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to assign decorator' });
+  }
+});
+
+app.patch('/api/bookings/:id/cancel', verifyToken, async (req, res) => {
+  try {
+    const booking = await bookingsCollection.findOne({ 
+      _id: new ObjectId(req.params.id) 
+    });
+
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    if (booking.userEmail !== req.user.email) {
+      return res.status(403).json({ message: 'Unauthorized' });
+    }
+
+    if (booking.status === 'completed' || booking.status === 'cancelled') {
+      return res.status(400).json({ 
+        message: 'Cannot cancel completed or already cancelled booking' 
+      });
+    }
+
+    const result = await bookingsCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { 
+        $set: { 
+          status: 'cancelled',
+          cancelledAt: new Date()
+        } 
+      }
+    );
+
+    res.json({ message: 'Booking cancelled successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to cancel booking' });
+  }
+});
+
+app.get('/api/bookings/my-assignments', verifyToken, verifyDecorator, async (req, res) => {
+  try {
+    const bookings = await bookingsCollection
+      .find({ assignedDecorator: req.user.email })
+      .sort({ bookingDate: 1 })
+      .toArray();
+
+    res.json({ bookings });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch assignments' });
+  }
+});
