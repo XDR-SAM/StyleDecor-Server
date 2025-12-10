@@ -158,3 +158,104 @@ app.get('/', (req, res) => {
     timestamp: new Date()
   });
 });
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, displayName, profileImage } = req.body;
+
+    const existingUser = await usersCollection.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'User already exists' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = {
+      email,
+      password: hashedPassword,
+      displayName,
+      profileImage: profileImage || '',
+      role: 'user',
+      createdAt: new Date(),
+      isActive: true
+    };
+
+    const result = await usersCollection.insertOne(newUser);
+
+    const token = jwt.sign(
+      { email, userId: result.insertedId, role: 'user' },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.status(201).json({
+      message: 'User registered successfully',
+      token,
+      user: {
+        email,
+        displayName,
+        role: 'user',
+        profileImage: profileImage || ''
+      }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ message: 'Registration failed', error: error.message });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const user = await usersCollection.findOne({ email });
+    if (!user) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    if (!user.isActive) {
+      return res.status(403).json({ message: 'Account is disabled' });
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { email: user.email, userId: user._id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      message: 'Login successful',
+      token,
+      user: {
+        email: user.email,
+        displayName: user.displayName,
+        role: user.role,
+        profileImage: user.profileImage
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ message: 'Login failed', error: error.message });
+  }
+});
+
+app.get('/api/auth/me', verifyToken, async (req, res) => {
+  try {
+    const user = await usersCollection.findOne(
+      { email: req.user.email },
+      { projection: { password: 0 } }
+    );
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to get user data' });
+  }
+});
