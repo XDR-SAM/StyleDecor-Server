@@ -1,0 +1,9 @@
+const express = require('express');
+const cors = require('cors');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const admin = require('firebase-admin');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const axios = require('axios');
+require('dotenv').config();
