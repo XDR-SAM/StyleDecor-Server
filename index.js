@@ -1019,3 +1019,15 @@ app.use((err, req, res, next) => {
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
+app.listen(PORT, () => {
+  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+process.on('SIGINT', async () => {
+  console.log('Shutting down gracefully...');
+  await client.close();
+  process.exit(0);
+});
+
+module.exports = app;
