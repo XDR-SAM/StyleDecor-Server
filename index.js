@@ -151,3 +151,10 @@ const verifyDecorator = async (req, res, next) => {
     res.status(500).json({ message: 'Authorization check failed' });
   }
 };
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'StyleDecor API is running',
+    status: 'active',
+    timestamp: new Date()
+  });
+});
