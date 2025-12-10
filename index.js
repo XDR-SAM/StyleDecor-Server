@@ -285,3 +285,138 @@ app.post('/api/upload-image', async (req, res) => {
     res.status(500).json({ message: 'Image upload failed' });
   }
 });
+app.get('/api/services', async (req, res) => {
+  try {
+    const { search, category, minPrice, maxPrice, page = 1, limit = 10 } = req.query;
+
+    let query = {};
+
+    if (search) {
+      query.service_name = { $regex: search, $options: 'i' };
+    }
+
+    if (category) {
+      query.service_category = category;
+    }
+
+    if (minPrice || maxPrice) {
+      query.cost = {};
+      if (minPrice) query.cost.$gte = parseFloat(minPrice);
+      if (maxPrice) query.cost.$lte = parseFloat(maxPrice);
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const services = await servicesCollection
+      .find(query)
+      .skip(skip)
+      .limit(parseInt(limit))
+      .toArray();
+
+    const total = await servicesCollection.countDocuments(query);
+
+    res.json({
+      services,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    console.error('Get services error:', error);
+    res.status(500).json({ message: 'Failed to fetch services' });
+  }
+});
+
+app.get('/api/services/:id', async (req, res) => {
+  try {
+    const service = await servicesCollection.findOne({ 
+      _id: new ObjectId(req.params.id) 
+    });
+
+    if (!service) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    res.json(service);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch service' });
+  }
+});
+
+app.post('/api/services', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { service_name, cost, unit, service_category, description, imageUrl } = req.body;
+
+    const newService = {
+      service_name,
+      cost: parseFloat(cost),
+      unit,
+      service_category,
+      description,
+      imageUrl: imageUrl || '',
+      createdByEmail: req.user.email,
+      createdAt: new Date(),
+      isActive: true
+    };
+
+    const result = await servicesCollection.insertOne(newService);
+
+    res.status(201).json({
+      message: 'Service created successfully',
+      serviceId: result.insertedId
+    });
+  } catch (error) {
+    console.error('Create service error:', error);
+    res.status(500).json({ message: 'Failed to create service' });
+  }
+});
+
+app.put('/api/services/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { service_name, cost, unit, service_category, description, imageUrl } = req.body;
+
+    const updateDoc = {
+      $set: {
+        service_name,
+        cost: parseFloat(cost),
+        unit,
+        service_category,
+        description,
+        imageUrl,
+        updatedAt: new Date()
+      }
+    };
+
+    const result = await servicesCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      updateDoc
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    res.json({ message: 'Service updated successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update service' });
+  }
+});
+
+app.delete('/api/services/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const result = await servicesCollection.deleteOne({ 
+      _id: new ObjectId(req.params.id) 
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    res.json({ message: 'Service deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to delete service' });
+  }
+});
