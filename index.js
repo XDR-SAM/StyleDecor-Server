@@ -1020,8 +1020,8 @@ app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 app.listen(PORT, () => {
-  console.log(`🚀 Server is running on port ${PORT}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(` Server is running on port ${PORT}`);
+  console.log(` Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
 process.on('SIGINT', async () => {
