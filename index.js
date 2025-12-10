@@ -647,3 +647,238 @@ app.get('/api/bookings/my-assignments', verifyToken, verifyDecorator, async (req
     res.status(500).json({ message: 'Failed to fetch assignments' });
   }
 });
+// Create Stripe Checkout Session
+app.post('/api/payments/create-checkout-session', verifyToken, async (req, res) => {
+  try {
+    const { bookingId } = req.body;
+
+    const booking = await bookingsCollection.findOne({ 
+      _id: new ObjectId(bookingId) 
+    });
+
+    if (!booking) {
+      return res.status(404).send({ message: 'Booking not found' });
+    }
+
+    if (booking.userEmail !== req.user.email) {
+      return res.status(403).send({ message: 'Unauthorized access' });
+    }
+
+    // Check both paymentStatus and isPaid for compatibility
+    if (booking.paymentStatus === 'paid' || booking.isPaid === true) {
+      return res.status(400).send({ message: 'Booking already paid' });
+    }
+
+    // Convert BDT to USD (approximate rate: 1 USD = 110 BDT)
+    const amountInBDT = booking.serviceCost;
+    const amountInUSD = (amountInBDT / 110).toFixed(2); // Convert to USD
+    const amountInCents = Math.round(parseFloat(amountInUSD) * 100); // Stripe needs cents
+
+    // Get frontend URL for redirects
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: booking.serviceName,
+              description: `Service booking for ${booking.serviceName}`,
+            },
+            unit_amount: amountInCents,
+          },
+          quantity: 1,
+        },
+      ],
+      mode: 'payment',
+      success_url: `${frontendUrl}/successful?session_id={CHECKOUT_SESSION_ID}&booking_id=${bookingId}`,
+      cancel_url: `${frontendUrl}/cancelled?booking_id=${bookingId}`,
+      metadata: {
+        bookingId: bookingId,
+        userEmail: req.user.email,
+        originalAmountBDT: amountInBDT.toString(),
+      },
+      customer_email: req.user.email,
+    });
+
+    res.send({
+      sessionId: session.id,
+      url: session.url,
+      amount: amountInBDT,
+      amountUSD: amountInUSD
+    });
+  } catch (error) {
+    console.error('Checkout session error:', error);
+    res.status(500).send({ 
+      message: 'Failed to create checkout session', 
+      error: error.message 
+    });
+  }
+});
+
+// Verify payment and update booking (called from success page)
+app.post('/api/payments/verify-session', verifyToken, async (req, res) => {
+  try {
+    const { sessionId, bookingId } = req.body;
+
+    // Retrieve the checkout session from Stripe
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (session.payment_status !== 'paid') {
+      return res.status(400).send({ message: 'Payment not completed' });
+    }
+
+    const booking = await bookingsCollection.findOne({ 
+      _id: new ObjectId(bookingId) 
+    });
+
+    if (!booking) {
+      return res.status(404).send({ message: 'Booking not found' });
+    }
+
+    if (booking.userEmail !== req.user.email) {
+      return res.status(403).send({ message: 'Unauthorized access' });
+    }
+
+    // Check if already paid
+    if (booking.paymentStatus === 'paid' || booking.isPaid === true) {
+      return res.send({ 
+        message: 'Payment already confirmed',
+        success: true 
+      });
+    }
+
+    // Update booking payment status
+    await bookingsCollection.updateOne(
+      { _id: new ObjectId(bookingId) },
+      { 
+        $set: { 
+          isPaid: true,
+          paymentStatus: 'paid',
+          status: 'confirmed',
+          paidAt: new Date(),
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    // Create payment record
+    const paymentRecord = {
+      bookingId: new ObjectId(bookingId),
+      userEmail: req.user.email,
+      amount: parseFloat(booking.serviceCost), // BDT amount
+      amountUSD: (parseFloat(booking.serviceCost) / 110).toFixed(2), // USD equivalent
+      paymentIntentId: session.payment_intent,
+      sessionId: sessionId,
+      currency: 'usd',
+      status: 'completed',
+      createdAt: new Date()
+    };
+
+    await paymentsCollection.insertOne(paymentRecord);
+
+    res.send({ 
+      message: 'Payment verified and confirmed successfully',
+      success: true
+    });
+  } catch (error) {
+    console.error('Payment verification error:', error);
+    res.status(500).send({ 
+      message: 'Failed to verify payment', 
+      error: error.message 
+    });
+  }
+});
+
+// Confirm Payment
+app.post('/api/payments/confirm', verifyToken, async (req, res) => {
+  try {
+    const { bookingId, paymentIntentId, amount } = req.body;
+
+    // Verify payment intent with Stripe
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+    if (paymentIntent.status !== 'succeeded') {
+      return res.status(400).send({ message: 'Payment not successful' });
+    }
+
+    // Update booking payment status (update both isPaid and paymentStatus for compatibility)
+    await bookingsCollection.updateOne(
+      { _id: new ObjectId(bookingId) },
+      { 
+        $set: { 
+          isPaid: true,
+          paymentStatus: 'paid',
+          status: 'confirmed',
+          paidAt: new Date(),
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    // Create payment record
+    const paymentRecord = {
+      bookingId: new ObjectId(bookingId),
+      userEmail: req.user.email,
+      amount: parseFloat(amount), // BDT amount
+      amountUSD: (parseFloat(amount) / 110).toFixed(2), // USD equivalent
+      paymentIntentId,
+      currency: 'usd',
+      status: 'completed',
+      createdAt: new Date()
+    };
+
+    const result = await paymentsCollection.insertOne(paymentRecord);
+
+    res.send({ 
+      message: 'Payment confirmed successfully',
+      success: true,
+      paymentId: result.insertedId
+    });
+  } catch (error) {
+    console.error('Payment confirmation error:', error);
+    res.status(500).send({ 
+      message: 'Failed to confirm payment', 
+      error: error.message 
+    });
+  }
+});
+
+// Get User's Payment History
+app.get('/api/payments/my-payments', verifyToken, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    const payments = await paymentsCollection
+      .find({ userEmail })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send({ payments });
+  } catch (error) {
+    console.error('Fetch payments error:', error);
+    res.status(500).send({ 
+      message: 'Failed to fetch payments', 
+      error: error.message 
+    });
+  }
+});
+
+// Get All Payments (Admin only)
+app.get('/api/payments', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const payments = await paymentsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+    
+    res.send(payments);
+  } catch (error) {
+    console.error('Fetch all payments error:', error);
+    res.status(500).send({ 
+      message: 'Failed to fetch payments', 
+      error: error.message 
+    });
+  }
+});
