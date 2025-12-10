@@ -957,3 +957,54 @@ app.patch('/api/decorators/:email/toggle-status', verifyToken, verifyAdmin, asyn
     res.status(500).json({ message: 'Failed to toggle decorator status' });
   }
 });
+app.get('/api/analytics/stats', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const totalUsers = await usersCollection.countDocuments({ role: 'user' });
+    const totalDecorators = await usersCollection.countDocuments({ role: 'decorator' });
+    const totalServices = await servicesCollection.countDocuments();
+    const totalBookings = await bookingsCollection.countDocuments();
+    const completedBookings = await bookingsCollection.countDocuments({ status: 'completed' });
+    const pendingBookings = await bookingsCollection.countDocuments({ status: 'pending' });
+    
+    const payments = await paymentsCollection
+      .find({ status: 'completed' })
+      .toArray();
+    
+    const totalRevenue = payments.reduce((sum, payment) => sum + payment.amount, 0);
+
+    res.json({
+      totalUsers,
+      totalDecorators,
+      totalServices,
+      totalBookings,
+      completedBookings,
+      pendingBookings,
+      totalRevenue
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch statistics' });
+  }
+});
+
+app.get('/api/analytics/service-demand', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const serviceDemand = await bookingsCollection.aggregate([
+      {
+        $group: {
+          _id: '$serviceName',
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $sort: { count: -1 }
+      },
+      {
+        $limit: 10
+      }
+    ]).toArray();
+
+    res.json({ serviceDemand });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch service demand data' });
+  }
+});
