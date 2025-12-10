@@ -7,3 +7,5 @@ const bcrypt = require('bcryptjs');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const axios = require('axios');
 require('dotenv').config();
+const app = express();
+const PORT = process.env.PORT || 5000;
