@@ -284,7 +284,60 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     await initializeDatabase();
     const usersCollection = getCollection('users');
-    const { email, password } = req.body;
+    const { email, password, firebaseToken, displayName, profileImage } = req.body;
+
+    // Support Google/Firebase social login by verifying Firebase token and
+    // creating a local user if missing.
+    if (firebaseToken) {
+      try {
+        const firebaseAdmin = getFirebaseAdmin();
+        const decodedToken = await firebaseAdmin.auth().verifyIdToken(firebaseToken);
+
+        if (decodedToken.email !== email) {
+          return res.status(400).json({ message: 'Email mismatch' });
+        }
+
+        let user = await usersCollection.findOne({ email });
+
+        if (!user) {
+          const newUser = {
+            email,
+            password: '',
+            displayName: displayName || decodedToken.name || email?.split('@')[0] || 'User',
+            profileImage: profileImage || decodedToken.picture || '',
+            role: 'user',
+            createdAt: new Date(),
+            isActive: true,
+            authProvider: 'google'
+          };
+
+          const result = await usersCollection.insertOne(newUser);
+          user = { ...newUser, _id: result.insertedId };
+        } else if (!user.isActive) {
+          return res.status(403).json({ message: 'Account is disabled' });
+        }
+
+        const token = jwt.sign(
+          { email: user.email, userId: user._id, role: user.role },
+          process.env.JWT_SECRET,
+          { expiresIn: '7d' }
+        );
+
+        return res.json({
+          message: 'Login successful',
+          token,
+          user: {
+            email: user.email,
+            displayName: user.displayName,
+            role: user.role,
+            profileImage: user.profileImage || ''
+          }
+        });
+      } catch (firebaseError) {
+        console.error('Firebase login error:', firebaseError);
+        return res.status(401).json({ message: 'Invalid Google token' });
+      }
+    }
 
     const user = await usersCollection.findOne({ email });
     if (!user) {
@@ -293,6 +346,10 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (!user.isActive) {
       return res.status(403).json({ message: 'Account is disabled' });
+    }
+
+    if (!password) {
+      return res.status(400).json({ message: 'Password required' });
     }
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
