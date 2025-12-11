@@ -1129,6 +1129,56 @@ app.get('/api/payments', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
+// ============ User Management Routes ============
+app.get('/api/users', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
+    const { search, role, page = 1, limit = 10 } = req.query;
+
+    let query = {};
+
+    // Filter by role if specified
+    if (role && role !== 'all') {
+      query.role = role;
+    }
+
+    // Search by name or email
+    if (search) {
+      query.$or = [
+        { displayName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // Run query and count in parallel
+    const [users, total] = await Promise.all([
+      usersCollection
+        .find(query, { projection: { password: 0 } })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .toArray(),
+      usersCollection.countDocuments(query)
+    ]);
+
+    res.json({
+      users,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    console.error('Get users error:', error);
+    res.status(500).json({ message: 'Failed to fetch users' });
+  }
+});
+
 // ============ Decorator Management Routes ============
 app.get('/api/decorators', async (req, res) => {
   try {
@@ -1178,6 +1228,76 @@ app.patch('/api/users/:email/make-decorator', verifyToken, verifyAdmin, async (r
     res.json({ message: 'User role updated to decorator successfully' });
   } catch (error) {
     res.status(500).json({ message: 'Failed to update user role' });
+  }
+});
+
+app.patch('/api/users/:email/toggle-role', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
+    const { email } = req.params;
+    const { specialty, rating, experience } = req.body;
+
+    // Get current user
+    const user = await usersCollection.findOne(
+      { email },
+      { projection: { role: 1 } }
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Prevent toggling admin role
+    if (user.role === 'admin') {
+      return res.status(403).json({ message: 'Cannot toggle admin role' });
+    }
+
+    let updateDoc = {};
+    let newRole = '';
+
+    if (user.role === 'user') {
+      // Promote to decorator
+      newRole = 'decorator';
+      updateDoc = {
+        $set: {
+          role: 'decorator',
+          specialty: specialty || '',
+          rating: parseFloat(rating) || 0,
+          experience: experience || '',
+          isActive: true,
+          updatedAt: new Date()
+        }
+      };
+    } else if (user.role === 'decorator') {
+      // Demote to user
+      newRole = 'user';
+      updateDoc = {
+        $set: {
+          role: 'user',
+          updatedAt: new Date()
+        },
+        $unset: {
+          specialty: '',
+          rating: '',
+          experience: ''
+        }
+      };
+    }
+
+    const result = await usersCollection.updateOne({ email }, updateDoc);
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({
+      message: `User role updated to ${newRole} successfully`,
+      newRole
+    });
+  } catch (error) {
+    console.error('Toggle role error:', error);
+    res.status(500).json({ message: 'Failed to toggle user role' });
   }
 });
 
