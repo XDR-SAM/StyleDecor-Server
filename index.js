@@ -1,7 +1,8 @@
+/* eslint-env node */
+/* eslint-disable */
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-const admin = require('firebase-admin');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
@@ -13,126 +14,183 @@ const PORT = process.env.PORT || 5000;
 
 // ============ Middleware ============
 app.use(cors({
-  origin: [process.env.FRONTEND_URL, 'http://localhost:5173', 'http://localhost:5174' , 'https://magical-dusk-71097f.netlify.app'],
+  origin: [process.env.FRONTEND_URL, 'http://localhost:5173', 'http://localhost:5174', 'https://magical-dusk-71097f.netlify.app'],
   credentials: true
 }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// ============ Firebase Admin Initialization ============
-const serviceAccount = {
-  type: "service_account",
-  project_id: process.env.FIREBASE_PROJECT_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  client_email: process.env.FIREBASE_CLIENT_EMAIL,
-};
+// ============ Firebase Admin Lazy Initialization ============
+// OPTIMIZATION: Lazy load Firebase only when needed
+let adminInitialized = false;
+let admin = null;
 
-try {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
-  console.log('✅ Firebase Admin initialized successfully');
-} catch (error) {
-  console.error('❌ Firebase Admin initialization failed:', error.message);
+function getFirebaseAdmin() {
+  if (!adminInitialized) {
+    admin = require('firebase-admin');
+    const serviceAccount = {
+      type: "service_account",
+      project_id: process.env.FIREBASE_PROJECT_ID,
+      private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      client_email: process.env.FIREBASE_CLIENT_EMAIL,
+    };
+
+    try {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      console.log('✅ Firebase Admin initialized successfully');
+      adminInitialized = true;
+    } catch (error) {
+      console.error('❌ Firebase Admin initialization failed:', error.message);
+    }
+  }
+  return admin;
 }
 
-// ============ MongoDB Connection ============
-const client = new MongoClient(process.env.MONGODB_URI, {
+// ============ MongoDB Connection with Caching ============
+// OPTIMIZATION: Cache connection across serverless invocations
+let cachedClient = null;
+let cachedDb = null;
+
+const mongoClient = new MongoClient(process.env.MONGODB_URI, {
   serverApi: {
     version: ServerApiVersion.v1,
     strict: true,
     deprecationErrors: true,
-  }
+  },
+  // OPTIMIZATION: Connection pooling settings
+  maxPoolSize: 10,
+  minPoolSize: 2,
+  maxIdleTimeMS: 60000,
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
 });
 
-let db;
-let usersCollection;
-let servicesCollection;
-let bookingsCollection;
-let paymentsCollection;
-
-async function connectDB() {
-  try {
-    await client.connect();
-    await client.db("admin").command({ ping: 1 });
-    console.log("✅ Successfully connected to MongoDB!");
-
-    db = client.db(process.env.DB_NAME || 'styledecor');
-    usersCollection = db.collection('users');
-    servicesCollection = db.collection('services');
-    bookingsCollection = db.collection('bookings');
-    paymentsCollection = db.collection('payments');
-
-    await usersCollection.createIndex({ email: 1 }, { unique: true });
-    await servicesCollection.createIndex({ service_name: 1 });
-    await bookingsCollection.createIndex({ userEmail: 1 });
-
-    await initializeSuperAdmin();
-  } catch (error) {
-    console.error("❌ MongoDB connection failed:", error);
-    process.exit(1);
+// OPTIMIZATION: Helper function to get collections (reuse pattern)
+async function getDb() {
+  if (cachedDb) {
+    return cachedDb;
   }
+
+  if (!cachedClient) {
+    cachedClient = await mongoClient.connect();
+    console.log("✅ MongoDB connected (new connection)");
+  }
+
+  cachedDb = cachedClient.db(process.env.DB_NAME || 'styledecor');
+  return cachedDb;
 }
 
-connectDB();
-
-// ============ Initialize Super Admin ============
-async function initializeSuperAdmin() {
-  try {
-    const existingAdmin = await usersCollection.findOne({ 
-      email: process.env.SUPER_ADMIN_EMAIL 
-    });
-
-    if (!existingAdmin) {
-      const hashedPassword = await bcrypt.hash(process.env.SUPER_ADMIN_PASSWORD, 10);
-      await usersCollection.insertOne({
-        email: process.env.SUPER_ADMIN_EMAIL,
-        password: hashedPassword,
-        displayName: 'Super Admin',
-        role: 'admin',
-        profileImage: '',
-        createdAt: new Date(),
-        isActive: true
-      });
-      console.log('✅ Super Admin created successfully');
-    } else {
-      console.log('ℹ️  Super Admin already exists');
-    }
-  } catch (error) {
-    console.error('❌ Super Admin initialization failed:', error);
+function getCollection(collectionName) {
+  if (!cachedDb) {
+    throw new Error('Database not initialized');
   }
+  return cachedDb.collection(collectionName);
+}
+
+// OPTIMIZATION: Non-blocking initialization
+// Run index creation and super admin setup in background
+let initPromise = null;
+
+async function initializeDatabase() {
+  if (initPromise) {
+    return initPromise;
+  }
+
+  initPromise = (async () => {
+    try {
+      const db = await getDb();
+
+      // Create indexes in parallel (non-blocking)
+      const usersCollection = db.collection('users');
+      const servicesCollection = db.collection('services');
+      const bookingsCollection = db.collection('bookings');
+
+      await Promise.all([
+        usersCollection.createIndex({ email: 1 }, { unique: true, background: true }),
+        servicesCollection.createIndex({ service_name: 1 }, { background: true }),
+        bookingsCollection.createIndex({ userEmail: 1 }, { background: true })
+      ]);
+
+      // OPTIMIZATION: Super admin creation in background (non-blocking)
+      setImmediate(async () => {
+        try {
+          const existingAdmin = await usersCollection.findOne(
+            { email: process.env.SUPER_ADMIN_EMAIL },
+            { projection: { _id: 1 } }
+          );
+
+          if (!existingAdmin) {
+            const hashedPassword = await bcrypt.hash(process.env.SUPER_ADMIN_PASSWORD, 10);
+            await usersCollection.insertOne({
+              email: process.env.SUPER_ADMIN_EMAIL,
+              password: hashedPassword,
+              displayName: 'Super Admin',
+              role: 'admin',
+              profileImage: '',
+              createdAt: new Date(),
+              isActive: true
+            });
+            console.log('✅ Super Admin created successfully');
+          }
+        } catch (error) {
+          console.error('❌ Super Admin initialization failed:', error);
+        }
+      });
+
+      console.log('✅ Database initialized');
+    } catch (error) {
+      console.error('❌ Database initialization failed:', error);
+      initPromise = null;
+      throw error;
+    }
+  })();
+
+  return initPromise;
 }
 
 // ============ JWT Middleware ============
+// OPTIMIZATION: Check JWT first (faster), then Firebase (slower)
 const verifyToken = async (req, res, next) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
-    
+
     if (!token) {
       return res.status(401).json({ message: 'No token provided' });
     }
 
+    // Try JWT first (faster)
     try {
-      const decodedToken = await admin.auth().verifyIdToken(token);
-      req.user = decodedToken;
-      next();
-    } catch (firebaseError) {
-      jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-        if (err) {
-          return res.status(403).json({ message: 'Invalid token' });
-        }
-        req.user = decoded;
-        next();
-      });
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      req.user = decoded;
+      return next();
+    } catch (jwtError) {
+      // If JWT fails, try Firebase (slower)
+      try {
+        const firebaseAdmin = getFirebaseAdmin();
+        const decodedToken = await firebaseAdmin.auth().verifyIdToken(token);
+        req.user = decodedToken;
+        return next();
+      } catch (firebaseError) {
+        return res.status(403).json({ message: 'Invalid token' });
+      }
     }
   } catch (error) {
     res.status(403).json({ message: 'Token verification failed' });
   }
 };
 
+// OPTIMIZATION: Use projection to fetch only role field
 const verifyAdmin = async (req, res, next) => {
   try {
-    const user = await usersCollection.findOne({ email: req.user.email });
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
+    const user = await usersCollection.findOne(
+      { email: req.user.email },
+      { projection: { role: 1 } }
+    );
+
     if (user?.role !== 'admin') {
       return res.status(403).json({ message: 'Admin access required' });
     }
@@ -142,9 +200,16 @@ const verifyAdmin = async (req, res, next) => {
   }
 };
 
+// OPTIMIZATION: Use projection to fetch only role field
 const verifyDecorator = async (req, res, next) => {
   try {
-    const user = await usersCollection.findOne({ email: req.user.email });
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
+    const user = await usersCollection.findOne(
+      { email: req.user.email },
+      { projection: { role: 1 } }
+    );
+
     if (user?.role !== 'decorator' && user?.role !== 'admin') {
       return res.status(403).json({ message: 'Decorator access required' });
     }
@@ -156,7 +221,7 @@ const verifyDecorator = async (req, res, next) => {
 
 // ============ Routes ============
 app.get('/', (req, res) => {
-  res.json({ 
+  res.json({
     message: 'StyleDecor API is running',
     status: 'active',
     timestamp: new Date()
@@ -166,9 +231,15 @@ app.get('/', (req, res) => {
 // ============ Auth Routes ============
 app.post('/api/auth/register', async (req, res) => {
   try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
     const { email, password, displayName, profileImage } = req.body;
 
-    const existingUser = await usersCollection.findOne({ email });
+    const existingUser = await usersCollection.findOne(
+      { email },
+      { projection: { _id: 1 } }
+    );
+
     if (existingUser) {
       return res.status(400).json({ message: 'User already exists' });
     }
@@ -211,6 +282,8 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
     const { email, password } = req.body;
 
     const user = await usersCollection.findOne({ email });
@@ -251,11 +324,13 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/me', verifyToken, async (req, res) => {
   try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
     const user = await usersCollection.findOne(
       { email: req.user.email },
       { projection: { password: 0 } }
     );
-    
+
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -279,8 +354,10 @@ app.post('/api/upload-image', async (req, res) => {
     formData.append('key', process.env.IMGBB_API_KEY);
     formData.append('image', image.split(',')[1] || image);
 
+    // OPTIMIZATION: Add timeout to external API call
     const response = await axios.post('https://api.imgbb.com/1/upload', formData, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 10000 // 10 second timeout
     });
 
     res.json({
@@ -297,6 +374,8 @@ app.post('/api/upload-image', async (req, res) => {
 // ============ Services Routes ============
 app.get('/api/services', async (req, res) => {
   try {
+    await initializeDatabase();
+    const servicesCollection = getCollection('services');
     const { search, category, minPrice, maxPrice, page = 1, limit = 10 } = req.query;
 
     let query = {};
@@ -316,14 +395,16 @@ app.get('/api/services', async (req, res) => {
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    
-    const services = await servicesCollection
-      .find(query)
-      .skip(skip)
-      .limit(parseInt(limit))
-      .toArray();
 
-    const total = await servicesCollection.countDocuments(query);
+    // OPTIMIZATION: Run query and count in parallel
+    const [services, total] = await Promise.all([
+      servicesCollection
+        .find(query)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .toArray(),
+      servicesCollection.countDocuments(query)
+    ]);
 
     res.json({
       services,
@@ -342,8 +423,10 @@ app.get('/api/services', async (req, res) => {
 
 app.get('/api/services/:id', async (req, res) => {
   try {
-    const service = await servicesCollection.findOne({ 
-      _id: new ObjectId(req.params.id) 
+    await initializeDatabase();
+    const servicesCollection = getCollection('services');
+    const service = await servicesCollection.findOne({
+      _id: new ObjectId(req.params.id)
     });
 
     if (!service) {
@@ -358,6 +441,8 @@ app.get('/api/services/:id', async (req, res) => {
 
 app.post('/api/services', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    await initializeDatabase();
+    const servicesCollection = getCollection('services');
     const { service_name, cost, unit, service_category, description, imageUrl } = req.body;
 
     const newService = {
@@ -386,6 +471,8 @@ app.post('/api/services', verifyToken, verifyAdmin, async (req, res) => {
 
 app.put('/api/services/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    await initializeDatabase();
+    const servicesCollection = getCollection('services');
     const { service_name, cost, unit, service_category, description, imageUrl } = req.body;
 
     const updateDoc = {
@@ -417,8 +504,10 @@ app.put('/api/services/:id', verifyToken, verifyAdmin, async (req, res) => {
 
 app.delete('/api/services/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const result = await servicesCollection.deleteOne({ 
-      _id: new ObjectId(req.params.id) 
+    await initializeDatabase();
+    const servicesCollection = getCollection('services');
+    const result = await servicesCollection.deleteOne({
+      _id: new ObjectId(req.params.id)
     });
 
     if (result.deletedCount === 0) {
@@ -434,17 +523,24 @@ app.delete('/api/services/:id', verifyToken, verifyAdmin, async (req, res) => {
 // ============ Bookings Routes ============
 app.post('/api/bookings', verifyToken, async (req, res) => {
   try {
+    await initializeDatabase();
+    const servicesCollection = getCollection('services');
+    const bookingsCollection = getCollection('bookings');
+    const usersCollection = getCollection('users');
     const { serviceId, bookingDate, location, userNotes } = req.body;
 
-    const service = await servicesCollection.findOne({ 
-      _id: new ObjectId(serviceId) 
-    });
+    // OPTIMIZATION: Fetch service and user in parallel
+    const [service, user] = await Promise.all([
+      servicesCollection.findOne({ _id: new ObjectId(serviceId) }),
+      usersCollection.findOne(
+        { email: req.user.email },
+        { projection: { displayName: 1 } }
+      )
+    ]);
 
     if (!service) {
       return res.status(404).json({ message: 'Service not found' });
     }
-
-    const user = await usersCollection.findOne({ email: req.user.email });
 
     const newBooking = {
       serviceId: new ObjectId(serviceId),
@@ -457,7 +553,7 @@ app.post('/api/bookings', verifyToken, async (req, res) => {
       userNotes: userNotes || '',
       status: 'pending',
       isPaid: false,
-      paymentStatus: 'unpaid', // Add paymentStatus field for consistency
+      paymentStatus: 'unpaid',
       assignedDecorator: null,
       createdAt: new Date()
     };
@@ -476,19 +572,21 @@ app.post('/api/bookings', verifyToken, async (req, res) => {
 
 app.get('/api/bookings/my-bookings', verifyToken, async (req, res) => {
   try {
+    await initializeDatabase();
+    const bookingsCollection = getCollection('bookings');
     const { page = 1, limit = 10 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const bookings = await bookingsCollection
-      .find({ userEmail: req.user.email })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit))
-      .toArray();
-
-    const total = await bookingsCollection.countDocuments({ 
-      userEmail: req.user.email 
-    });
+    // OPTIMIZATION: Run query and count in parallel
+    const [bookings, total] = await Promise.all([
+      bookingsCollection
+        .find({ userEmail: req.user.email })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .toArray(),
+      bookingsCollection.countDocuments({ userEmail: req.user.email })
+    ]);
 
     res.json({
       bookings,
@@ -506,23 +604,27 @@ app.get('/api/bookings/my-bookings', verifyToken, async (req, res) => {
 
 app.get('/api/bookings', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    await initializeDatabase();
+    const bookingsCollection = getCollection('bookings');
     const { page = 1, limit = 10, status, sortBy = 'createdAt' } = req.query;
-    
+
     let query = {};
     if (status) {
       query.status = status;
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    
-    const bookings = await bookingsCollection
-      .find(query)
-      .sort({ [sortBy]: -1 })
-      .skip(skip)
-      .limit(parseInt(limit))
-      .toArray();
 
-    const total = await bookingsCollection.countDocuments(query);
+    // OPTIMIZATION: Run query and count in parallel
+    const [bookings, total] = await Promise.all([
+      bookingsCollection
+        .find(query)
+        .sort({ [sortBy]: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .toArray(),
+      bookingsCollection.countDocuments(query)
+    ]);
 
     res.json({
       bookings,
@@ -540,16 +642,23 @@ app.get('/api/bookings', verifyToken, verifyAdmin, async (req, res) => {
 
 app.patch('/api/bookings/:id/status', verifyToken, async (req, res) => {
   try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
+    const bookingsCollection = getCollection('bookings');
     const { status } = req.body;
-    const user = await usersCollection.findOne({ email: req.user.email });
+
+    const user = await usersCollection.findOne(
+      { email: req.user.email },
+      { projection: { role: 1 } }
+    );
 
     if (user.role !== 'admin' && user.role !== 'decorator') {
       return res.status(403).json({ message: 'Unauthorized' });
     }
 
     const validStatuses = [
-      'pending', 'confirmed', 'assigned', 'planning', 
-      'materials-prepared', 'on-the-way', 'in-progress', 
+      'pending', 'confirmed', 'assigned', 'planning',
+      'materials-prepared', 'on-the-way', 'in-progress',
       'completed', 'cancelled'
     ];
 
@@ -559,11 +668,11 @@ app.patch('/api/bookings/:id/status', verifyToken, async (req, res) => {
 
     const result = await bookingsCollection.updateOne(
       { _id: new ObjectId(req.params.id) },
-      { 
-        $set: { 
+      {
+        $set: {
           status,
           updatedAt: new Date()
-        } 
+        }
       }
     );
 
@@ -579,12 +688,15 @@ app.patch('/api/bookings/:id/status', verifyToken, async (req, res) => {
 
 app.patch('/api/bookings/:id/assign-decorator', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
+    const bookingsCollection = getCollection('bookings');
     const { decoratorEmail } = req.body;
 
-    const decorator = await usersCollection.findOne({ 
-      email: decoratorEmail,
-      role: 'decorator'
-    });
+    const decorator = await usersCollection.findOne(
+      { email: decoratorEmail, role: 'decorator' },
+      { projection: { _id: 1 } }
+    );
 
     if (!decorator) {
       return res.status(404).json({ message: 'Decorator not found' });
@@ -592,12 +704,12 @@ app.patch('/api/bookings/:id/assign-decorator', verifyToken, verifyAdmin, async 
 
     const result = await bookingsCollection.updateOne(
       { _id: new ObjectId(req.params.id) },
-      { 
-        $set: { 
+      {
+        $set: {
           assignedDecorator: decoratorEmail,
           status: 'assigned',
           updatedAt: new Date()
-        } 
+        }
       }
     );
 
@@ -613,8 +725,10 @@ app.patch('/api/bookings/:id/assign-decorator', verifyToken, verifyAdmin, async 
 
 app.patch('/api/bookings/:id/cancel', verifyToken, async (req, res) => {
   try {
-    const booking = await bookingsCollection.findOne({ 
-      _id: new ObjectId(req.params.id) 
+    await initializeDatabase();
+    const bookingsCollection = getCollection('bookings');
+    const booking = await bookingsCollection.findOne({
+      _id: new ObjectId(req.params.id)
     });
 
     if (!booking) {
@@ -626,18 +740,18 @@ app.patch('/api/bookings/:id/cancel', verifyToken, async (req, res) => {
     }
 
     if (booking.status === 'completed' || booking.status === 'cancelled') {
-      return res.status(400).json({ 
-        message: 'Cannot cancel completed or already cancelled booking' 
+      return res.status(400).json({
+        message: 'Cannot cancel completed or already cancelled booking'
       });
     }
 
     const result = await bookingsCollection.updateOne(
       { _id: new ObjectId(req.params.id) },
-      { 
-        $set: { 
+      {
+        $set: {
           status: 'cancelled',
           cancelledAt: new Date()
-        } 
+        }
       }
     );
 
@@ -649,6 +763,8 @@ app.patch('/api/bookings/:id/cancel', verifyToken, async (req, res) => {
 
 app.get('/api/bookings/my-assignments', verifyToken, verifyDecorator, async (req, res) => {
   try {
+    await initializeDatabase();
+    const bookingsCollection = getCollection('bookings');
     const bookings = await bookingsCollection
       .find({ assignedDecorator: req.user.email })
       .sort({ bookingDate: 1 })
@@ -662,13 +778,15 @@ app.get('/api/bookings/my-assignments', verifyToken, verifyDecorator, async (req
 
 // ==================== PAYMENT ROUTES ====================
 
-// Create Stripe Checkout Session
-app.post('/api/payments/create-checkout-session', verifyToken, async (req, res) => {
+// Create Payment Intent (legacy card form flow)
+app.post('/api/payments/create-intent', verifyToken, async (req, res) => {
   try {
+    await initializeDatabase();
+    const bookingsCollection = getCollection('bookings');
     const { bookingId } = req.body;
 
-    const booking = await bookingsCollection.findOne({ 
-      _id: new ObjectId(bookingId) 
+    const booking = await bookingsCollection.findOne({
+      _id: new ObjectId(bookingId)
     });
 
     if (!booking) {
@@ -679,17 +797,66 @@ app.post('/api/payments/create-checkout-session', verifyToken, async (req, res) 
       return res.status(403).send({ message: 'Unauthorized access' });
     }
 
-    // Check both paymentStatus and isPaid for compatibility
     if (booking.paymentStatus === 'paid' || booking.isPaid === true) {
       return res.status(400).send({ message: 'Booking already paid' });
     }
 
-    // Convert BDT to USD (approximate rate: 1 USD = 110 BDT)
     const amountInBDT = booking.serviceCost;
-    const amountInUSD = (amountInBDT / 110).toFixed(2); // Convert to USD
-    const amountInCents = Math.round(parseFloat(amountInUSD) * 100); // Stripe needs cents
+    const amountInUSD = (amountInBDT / 110).toFixed(2);
+    const amountInCents = Math.round(parseFloat(amountInUSD) * 100);
 
-    // Get frontend URL for redirects
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: 'usd',
+      metadata: {
+        bookingId: bookingId,
+        userEmail: req.user.email,
+        originalAmountBDT: amountInBDT.toString(),
+      },
+      receipt_email: req.user.email,
+    });
+
+    res.send({
+      clientSecret: paymentIntent.client_secret,
+      amount: amountInBDT,
+      amountUSD: amountInUSD
+    });
+  } catch (error) {
+    console.error('Payment intent error:', error);
+    res.status(500).send({
+      message: 'Failed to create payment intent',
+      error: error.message
+    });
+  }
+});
+
+// Create Stripe Checkout Session
+app.post('/api/payments/create-checkout-session', verifyToken, async (req, res) => {
+  try {
+    await initializeDatabase();
+    const bookingsCollection = getCollection('bookings');
+    const { bookingId } = req.body;
+
+    const booking = await bookingsCollection.findOne({
+      _id: new ObjectId(bookingId)
+    });
+
+    if (!booking) {
+      return res.status(404).send({ message: 'Booking not found' });
+    }
+
+    if (booking.userEmail !== req.user.email) {
+      return res.status(403).send({ message: 'Unauthorized access' });
+    }
+
+    if (booking.paymentStatus === 'paid' || booking.isPaid === true) {
+      return res.status(400).send({ message: 'Booking already paid' });
+    }
+
+    const amountInBDT = booking.serviceCost;
+    const amountInUSD = (amountInBDT / 110).toFixed(2);
+    const amountInCents = Math.round(parseFloat(amountInUSD) * 100);
+
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
     const session = await stripe.checkout.sessions.create({
@@ -726,9 +893,9 @@ app.post('/api/payments/create-checkout-session', verifyToken, async (req, res) 
     });
   } catch (error) {
     console.error('Checkout session error:', error);
-    res.status(500).send({ 
-      message: 'Failed to create checkout session', 
-      error: error.message 
+    res.status(500).send({
+      message: 'Failed to create checkout session',
+      error: error.message
     });
   }
 });
@@ -736,17 +903,19 @@ app.post('/api/payments/create-checkout-session', verifyToken, async (req, res) 
 // Verify payment and update booking (called from success page)
 app.post('/api/payments/verify-session', verifyToken, async (req, res) => {
   try {
+    await initializeDatabase();
+    const bookingsCollection = getCollection('bookings');
+    const paymentsCollection = getCollection('payments');
     const { sessionId, bookingId } = req.body;
 
-    // Retrieve the checkout session from Stripe
     const session = await stripe.checkout.sessions.retrieve(sessionId);
 
     if (session.payment_status !== 'paid') {
       return res.status(400).send({ message: 'Payment not completed' });
     }
 
-    const booking = await bookingsCollection.findOne({ 
-      _id: new ObjectId(bookingId) 
+    const booking = await bookingsCollection.findOne({
+      _id: new ObjectId(bookingId)
     });
 
     if (!booking) {
@@ -757,34 +926,19 @@ app.post('/api/payments/verify-session', verifyToken, async (req, res) => {
       return res.status(403).send({ message: 'Unauthorized access' });
     }
 
-    // Check if already paid
     if (booking.paymentStatus === 'paid' || booking.isPaid === true) {
-      return res.send({ 
+      return res.send({
         message: 'Payment already confirmed',
-        success: true 
+        success: true
       });
     }
 
-    // Update booking payment status
-    await bookingsCollection.updateOne(
-      { _id: new ObjectId(bookingId) },
-      { 
-        $set: { 
-          isPaid: true,
-          paymentStatus: 'paid',
-          status: 'confirmed',
-          paidAt: new Date(),
-          updatedAt: new Date()
-        } 
-      }
-    );
-
-    // Create payment record
+    // OPTIMIZATION: Run booking update and payment insert in parallel
     const paymentRecord = {
       bookingId: new ObjectId(bookingId),
       userEmail: req.user.email,
-      amount: parseFloat(booking.serviceCost), // BDT amount
-      amountUSD: (parseFloat(booking.serviceCost) / 110).toFixed(2), // USD equivalent
+      amount: parseFloat(booking.serviceCost),
+      amountUSD: (parseFloat(booking.serviceCost) / 110).toFixed(2),
       paymentIntentId: session.payment_intent,
       sessionId: sessionId,
       currency: 'usd',
@@ -792,17 +946,31 @@ app.post('/api/payments/verify-session', verifyToken, async (req, res) => {
       createdAt: new Date()
     };
 
-    await paymentsCollection.insertOne(paymentRecord);
+    await Promise.all([
+      bookingsCollection.updateOne(
+        { _id: new ObjectId(bookingId) },
+        {
+          $set: {
+            isPaid: true,
+            paymentStatus: 'paid',
+            status: 'confirmed',
+            paidAt: new Date(),
+            updatedAt: new Date()
+          }
+        }
+      ),
+      paymentsCollection.insertOne(paymentRecord)
+    ]);
 
-    res.send({ 
+    res.send({
       message: 'Payment verified and confirmed successfully',
       success: true
     });
   } catch (error) {
     console.error('Payment verification error:', error);
-    res.status(500).send({ 
-      message: 'Failed to verify payment', 
-      error: error.message 
+    res.status(500).send({
+      message: 'Failed to verify payment',
+      error: error.message
     });
   }
 });
@@ -810,53 +978,55 @@ app.post('/api/payments/verify-session', verifyToken, async (req, res) => {
 // Confirm Payment
 app.post('/api/payments/confirm', verifyToken, async (req, res) => {
   try {
+    await initializeDatabase();
+    const bookingsCollection = getCollection('bookings');
+    const paymentsCollection = getCollection('payments');
     const { bookingId, paymentIntentId, amount } = req.body;
 
-    // Verify payment intent with Stripe
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
     if (paymentIntent.status !== 'succeeded') {
       return res.status(400).send({ message: 'Payment not successful' });
     }
 
-    // Update booking payment status (update both isPaid and paymentStatus for compatibility)
-    await bookingsCollection.updateOne(
-      { _id: new ObjectId(bookingId) },
-      { 
-        $set: { 
-          isPaid: true,
-          paymentStatus: 'paid',
-          status: 'confirmed',
-          paidAt: new Date(),
-          updatedAt: new Date()
-        } 
-      }
-    );
-
-    // Create payment record
+    // OPTIMIZATION: Run booking update and payment insert in parallel
     const paymentRecord = {
       bookingId: new ObjectId(bookingId),
       userEmail: req.user.email,
-      amount: parseFloat(amount), // BDT amount
-      amountUSD: (parseFloat(amount) / 110).toFixed(2), // USD equivalent
+      amount: parseFloat(amount),
+      amountUSD: (parseFloat(amount) / 110).toFixed(2),
       paymentIntentId,
       currency: 'usd',
       status: 'completed',
       createdAt: new Date()
     };
 
-    const result = await paymentsCollection.insertOne(paymentRecord);
+    const [, result] = await Promise.all([
+      bookingsCollection.updateOne(
+        { _id: new ObjectId(bookingId) },
+        {
+          $set: {
+            isPaid: true,
+            paymentStatus: 'paid',
+            status: 'confirmed',
+            paidAt: new Date(),
+            updatedAt: new Date()
+          }
+        }
+      ),
+      paymentsCollection.insertOne(paymentRecord)
+    ]);
 
-    res.send({ 
+    res.send({
       message: 'Payment confirmed successfully',
       success: true,
       paymentId: result.insertedId
     });
   } catch (error) {
     console.error('Payment confirmation error:', error);
-    res.status(500).send({ 
-      message: 'Failed to confirm payment', 
-      error: error.message 
+    res.status(500).send({
+      message: 'Failed to confirm payment',
+      error: error.message
     });
   }
 });
@@ -864,6 +1034,8 @@ app.post('/api/payments/confirm', verifyToken, async (req, res) => {
 // Get User's Payment History
 app.get('/api/payments/my-payments', verifyToken, async (req, res) => {
   try {
+    await initializeDatabase();
+    const paymentsCollection = getCollection('payments');
     const userEmail = req.user.email;
     const payments = await paymentsCollection
       .find({ userEmail })
@@ -873,9 +1045,9 @@ app.get('/api/payments/my-payments', verifyToken, async (req, res) => {
     res.send({ payments });
   } catch (error) {
     console.error('Fetch payments error:', error);
-    res.status(500).send({ 
-      message: 'Failed to fetch payments', 
-      error: error.message 
+    res.status(500).send({
+      message: 'Failed to fetch payments',
+      error: error.message
     });
   }
 });
@@ -883,17 +1055,19 @@ app.get('/api/payments/my-payments', verifyToken, async (req, res) => {
 // Get All Payments (Admin only)
 app.get('/api/payments', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    await initializeDatabase();
+    const paymentsCollection = getCollection('payments');
     const payments = await paymentsCollection
       .find({})
       .sort({ createdAt: -1 })
       .toArray();
-    
+
     res.send(payments);
   } catch (error) {
     console.error('Fetch all payments error:', error);
-    res.status(500).send({ 
-      message: 'Failed to fetch payments', 
-      error: error.message 
+    res.status(500).send({
+      message: 'Failed to fetch payments',
+      error: error.message
     });
   }
 });
@@ -901,6 +1075,8 @@ app.get('/api/payments', verifyToken, verifyAdmin, async (req, res) => {
 // ============ Decorator Management Routes ============
 app.get('/api/decorators', async (req, res) => {
   try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
     const { search } = req.query;
     let query = { role: 'decorator' };
 
@@ -920,19 +1096,21 @@ app.get('/api/decorators', async (req, res) => {
 
 app.patch('/api/users/:email/make-decorator', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
     const { email } = req.params;
     const { specialty, rating, experience } = req.body;
 
     const result = await usersCollection.updateOne(
       { email },
-      { 
-        $set: { 
+      {
+        $set: {
           role: 'decorator',
           specialty: specialty || '',
           rating: rating || 0,
           experience: experience || '',
           updatedAt: new Date()
-        } 
+        }
       }
     );
 
@@ -948,25 +1126,30 @@ app.patch('/api/users/:email/make-decorator', verifyToken, verifyAdmin, async (r
 
 app.patch('/api/decorators/:email/toggle-status', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
     const { email } = req.params;
 
-    const user = await usersCollection.findOne({ email, role: 'decorator' });
-    
+    const user = await usersCollection.findOne(
+      { email, role: 'decorator' },
+      { projection: { isActive: 1 } }
+    );
+
     if (!user) {
       return res.status(404).json({ message: 'Decorator not found' });
     }
 
     const result = await usersCollection.updateOne(
       { email },
-      { 
-        $set: { 
+      {
+        $set: {
           isActive: !user.isActive,
           updatedAt: new Date()
-        } 
+        }
       }
     );
 
-    res.json({ 
+    res.json({
       message: `Decorator ${user.isActive ? 'disabled' : 'enabled'} successfully`,
       isActive: !user.isActive
     });
@@ -978,17 +1161,31 @@ app.patch('/api/decorators/:email/toggle-status', verifyToken, verifyAdmin, asyn
 // ============ Analytics Routes ============
 app.get('/api/analytics/stats', verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const totalUsers = await usersCollection.countDocuments({ role: 'user' });
-    const totalDecorators = await usersCollection.countDocuments({ role: 'decorator' });
-    const totalServices = await servicesCollection.countDocuments();
-    const totalBookings = await bookingsCollection.countDocuments();
-    const completedBookings = await bookingsCollection.countDocuments({ status: 'completed' });
-    const pendingBookings = await bookingsCollection.countDocuments({ status: 'pending' });
-    
-    const payments = await paymentsCollection
-      .find({ status: 'completed' })
-      .toArray();
-    
+    await initializeDatabase();
+    const usersCollection = getCollection('users');
+    const servicesCollection = getCollection('services');
+    const bookingsCollection = getCollection('bookings');
+    const paymentsCollection = getCollection('payments');
+
+    // OPTIMIZATION: Run all count queries in parallel
+    const [
+      totalUsers,
+      totalDecorators,
+      totalServices,
+      totalBookings,
+      completedBookings,
+      pendingBookings,
+      payments
+    ] = await Promise.all([
+      usersCollection.countDocuments({ role: 'user' }),
+      usersCollection.countDocuments({ role: 'decorator' }),
+      servicesCollection.countDocuments(),
+      bookingsCollection.countDocuments(),
+      bookingsCollection.countDocuments({ status: 'completed' }),
+      bookingsCollection.countDocuments({ status: 'pending' }),
+      paymentsCollection.find({ status: 'completed' }).toArray()
+    ]);
+
     const totalRevenue = payments.reduce((sum, payment) => sum + payment.amount, 0);
 
     res.json({
@@ -1007,6 +1204,8 @@ app.get('/api/analytics/stats', verifyToken, verifyAdmin, async (req, res) => {
 
 app.get('/api/analytics/service-demand', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    await initializeDatabase();
+    const bookingsCollection = getCollection('bookings');
     const serviceDemand = await bookingsCollection.aggregate([
       {
         $group: {
@@ -1031,7 +1230,7 @@ app.get('/api/analytics/service-demand', verifyToken, verifyAdmin, async (req, r
 // ============ Error Handling ============
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ 
+  res.status(500).json({
     message: 'Something went wrong!',
     error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
@@ -1041,16 +1240,23 @@ app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
-// ============ Server Start ============
-app.listen(PORT, () => {
-  console.log(`🚀 Server is running on port ${PORT}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-});
+// ============ Server Start (Only for local development) ============
+// OPTIMIZATION: Don't listen in production (Vercel serverless)
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server is running on port ${PORT}`);
+    console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  });
+}
 
+// Graceful shutdown (only relevant for local development)
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
-  await client.close();
+  if (cachedClient) {
+    await cachedClient.close();
+  }
   process.exit(0);
 });
 
+// OPTIMIZATION: Export app for Vercel serverless
 module.exports = app;
