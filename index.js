@@ -102,6 +102,8 @@ async function initializeSuperAdmin() {
     console.error('❌ Super Admin initialization failed:', error);
   }
 }
+
+// ============ JWT Middleware ============
 const verifyToken = async (req, res, next) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
@@ -151,6 +153,8 @@ const verifyDecorator = async (req, res, next) => {
     res.status(500).json({ message: 'Authorization check failed' });
   }
 };
+
+// ============ Routes ============
 app.get('/', (req, res) => {
   res.json({ 
     message: 'StyleDecor API is running',
@@ -158,6 +162,8 @@ app.get('/', (req, res) => {
     timestamp: new Date()
   });
 });
+
+// ============ Auth Routes ============
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, displayName, profileImage } = req.body;
@@ -259,6 +265,8 @@ app.get('/api/auth/me', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'Failed to get user data' });
   }
 });
+
+// ============ Image Upload Route ============
 app.post('/api/upload-image', async (req, res) => {
   try {
     const { image } = req.body;
@@ -285,6 +293,8 @@ app.post('/api/upload-image', async (req, res) => {
     res.status(500).json({ message: 'Image upload failed' });
   }
 });
+
+// ============ Services Routes ============
 app.get('/api/services', async (req, res) => {
   try {
     const { search, category, minPrice, maxPrice, page = 1, limit = 10 } = req.query;
@@ -420,6 +430,8 @@ app.delete('/api/services/:id', verifyToken, verifyAdmin, async (req, res) => {
     res.status(500).json({ message: 'Failed to delete service' });
   }
 });
+
+// ============ Bookings Routes ============
 app.post('/api/bookings', verifyToken, async (req, res) => {
   try {
     const { serviceId, bookingDate, location, userNotes } = req.body;
@@ -647,6 +659,9 @@ app.get('/api/bookings/my-assignments', verifyToken, verifyDecorator, async (req
     res.status(500).json({ message: 'Failed to fetch assignments' });
   }
 });
+
+// ==================== PAYMENT ROUTES ====================
+
 // Create Stripe Checkout Session
 app.post('/api/payments/create-checkout-session', verifyToken, async (req, res) => {
   try {
@@ -882,7 +897,9 @@ app.get('/api/payments', verifyToken, verifyAdmin, async (req, res) => {
     });
   }
 });
-pp.get('/api/decorators', async (req, res) => {
+
+// ============ Decorator Management Routes ============
+app.get('/api/decorators', async (req, res) => {
   try {
     const { search } = req.query;
     let query = { role: 'decorator' };
@@ -957,6 +974,8 @@ app.patch('/api/decorators/:email/toggle-status', verifyToken, verifyAdmin, asyn
     res.status(500).json({ message: 'Failed to toggle decorator status' });
   }
 });
+
+// ============ Analytics Routes ============
 app.get('/api/analytics/stats', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const totalUsers = await usersCollection.countDocuments({ role: 'user' });
@@ -1008,6 +1027,8 @@ app.get('/api/analytics/service-demand', verifyToken, verifyAdmin, async (req, r
     res.status(500).json({ message: 'Failed to fetch service demand data' });
   }
 });
+
+// ============ Error Handling ============
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ 
@@ -1019,9 +1040,11 @@ app.use((err, req, res, next) => {
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
+
+// ============ Server Start ============
 app.listen(PORT, () => {
-  console.log(` Server is running on port ${PORT}`);
-  console.log(` Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
 process.on('SIGINT', async () => {
