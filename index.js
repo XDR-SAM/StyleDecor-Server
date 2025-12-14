@@ -824,7 +824,7 @@ app.get('/api/bookings/my-assignments', verifyToken, verifyDecorator, async (req
     const bookingsCollection = getCollection('bookings');
     const bookings = await bookingsCollection
       .find({ assignedDecorator: req.user.email })
-      .sort({ bookingDate: 1 })
+      .sort({ createdAt: -1 })
       .toArray();
 
     res.json({ bookings });
