@@ -420,7 +420,6 @@ StyleDecor-Server/
 ├── index.js                # Main application file (1488 lines)
 ├── package.json            # NPM dependencies
 ├── vercel.json             # Vercel deployment config
-├── frontendreadme.md       # Frontend documentation reference
 └── README.md               # This file
 ```
 
@@ -574,7 +573,7 @@ This project is part of Assignment 11 from Programming Hero (PH).
 
 ## 🙏 Acknowledgments
 
-- Programming Hero for the assignment framework
+- Programming Hero for the assignment 
 - MongoDB for the robust database solution
 - Firebase for authentication services
 - Stripe for payment processing infrastructure
